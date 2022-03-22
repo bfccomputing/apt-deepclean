@@ -1,0 +1,259 @@
+#!/usr/bin/perl -w
+use strict;
+use warnings FATAL=>'all';
+use Getopt::Long;
+use Pod::Usage;
+use AptPkg::Config '$_config';
+use AptPkg::System '$_system';
+use AptPkg::Version;
+use AptPkg::Cache;
+
+my $DEBUG          = 0;
+my $HELP	   = 0;
+my $MAN		   = 0;
+my $DRY_RUN        = 0;
+my $KEEP_INSTALLED = 0;
+my $KEEP_LATEST    = 0;
+my $KEEP_UPDATES   = 1;
+
+GetOptions (
+  "debug!"          => \$DEBUG,
+  "dry-run!"        => \$DRY_RUN,
+  "keep-installed!" => \$KEEP_INSTALLED,
+  "keep-latest!"    => \$KEEP_LATEST,
+  "keep-updates!"   => \$KEEP_UPDATES,
+  "help|h|?"        => \$HELP,
+  "man"		    => \$MAN,
+) or die("Error in command line arguments\n");
+
+pod2usage(1) if $HELP;
+pod2usage(-exitval => 0, -verbose => 2, -noperldoc => 1) if $MAN;
+
+if ($DEBUG) {
+  use Data::Dumper;
+}
+
+# maybe this can be pulled from APT preferences? TODO
+my $ARCHIVE_DIR = '/var/cache/apt/archives';
+
+# what has this lock?  It's there all the time.
+#if (-e "$ARCHIVE_DIR/lock") {
+#    warn("Refusing to run because $ARCHIVE_DIR/lock exists.");
+#    exit(-1);
+#}
+
+my (@archives,$archive_dir,$archive,%archives,%packages);
+
+opendir($archive_dir,$ARCHIVE_DIR);
+while ($archive = readdir($archive_dir)) {
+  push(@archives,$archive);
+}
+closedir($archive_dir);
+
+@archives = grep {/\.deb$/} @archives;
+#print Dumper(\@archives);
+
+foreach my $archive (@archives) {
+  $archive =~ m/(.*?)_(.*?)_(.*?)\.deb/;
+  if (!defined($archives{$1})) {
+    $archives{$1} = [];
+  }
+  my (%spec);
+  $spec{'version'} = $2;
+  $spec{'arch'} = $3;
+  push(@{$archives{$1}},\%spec);
+}
+#print Dumper(\%archives);
+
+$_config->init;
+
+$_system          = $_config->system;
+$_config->{quiet} = 2;
+my $cache         = AptPkg::Cache->new;
+my $policy        = $cache->policy;
+my $versioning    = $_system->versioning;
+
+foreach my $archive_package (keys(%archives)) {
+
+    my $package = $cache->{$archive_package};
+    unless ($package) {
+      warn "package '$archive_package' isn't in the apt database ... skipping.\n";
+      next;
+    }
+
+    foreach my $field (qw/SelectedState InstState CurrentState/) {
+      $packages{$archive_package}{$field} = $package->{$field};
+    }
+
+    $packages{$archive_package}{'CurrentVer'} = $package->{'CurrentVer'}{'VerStr'} if $package->{'CurrentVer'};
+    if (my $candidate = $policy->candidate($package)) {
+        $packages{$archive_package}{'CandidateVer'} = $candidate->{'VerStr'};
+    }
+}
+#print Dumper(\%packages);
+
+my (@files_to_delete);
+foreach my $package (keys(%packages)) {
+  unless ($packages{$package}{'CurrentVer'} eq $packages{$package}{'CandidateVer'}) {
+    warn "package '$package' is pending upgrade ... ignoring.\n";
+    next;
+  }
+  my $debug = "$package :: \n";
+  foreach my $archive (keys(%archives)) {
+    if ($package eq $archive) {
+      my @versions = ();
+      foreach my $spec_ref ( @{$archives{$archive}} ) {
+        my %spec = %{$spec_ref};
+        my $version = $spec{'version'};
+        push(@versions,$version);
+      }
+      my @sorted_versions = sort( { $versioning->compare($a,$b) } @versions);
+      $debug .= "archive versions: " . join(' ',@sorted_versions) ."\n";
+      my @versions_to_delete = @sorted_versions;
+      if (1 == @versions) {
+        $debug .= " only one version\n";
+      }
+      if ($KEEP_LATEST) {
+        @versions_to_delete = grep { $_ ne $versions_to_delete[-1] } @versions_to_delete; 
+      }
+      if ($KEEP_INSTALLED) {
+        @versions_to_delete = grep { $_ ne $packages{$archive}{CurrentVer} } @versions_to_delete; 
+      }
+      if ($KEEP_UPDATES) {
+        @versions_to_delete = grep { $versioning->compare($_,$packages{$archive}{CurrentVer}) <= 0 } @versions_to_delete;
+      }
+      $debug .= "versions to delete: " . join(' ', @versions_to_delete) . "\n";
+      foreach my $spec_ref ( @{$archives{$archive}} ) {
+        my %spec = %{$spec_ref};
+        my $version = $spec{'version'};
+        my $arch    = $spec{'arch'};
+        foreach my $delete_me (@versions_to_delete) {
+          if ($version eq $delete_me) {
+            my $archive_name = $archive . '_' . $delete_me . '_' . $arch . '.deb';
+            push(@files_to_delete,$archive_name);
+          }
+        }
+      }
+    }   
+  }
+  debug($debug);
+}
+
+#print Dumper(\@files_to_delete);
+
+foreach my $file (sort(@files_to_delete)) {
+  my $filename = "$ARCHIVE_DIR/$file";
+  debug("deleting $filename") if $DEBUG;
+  if ($DRY_RUN) {
+    print "would delete $filename\n";
+  } else {
+    unlink "$ARCHIVE_DIR/$file" or warn "Could not unlink $file: $!";
+  }
+}
+
+sub debug {
+  my @params = @_;
+  if ($DEBUG) {
+    print join(' ',@params) . "\n";
+  }
+}
+
+__END__
+
+=head1 NAME
+apt-deepclean - remove apt archive files you probably won't need
+
+=head1 SYNOPSIS
+
+apt-deepclean [--dry-run] [--[no-]keep-updates] [--[no-]keep-latest] [--[no-]keep-installed] [--debug] [--help|-h] [--man]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--dry-run>
+
+Don't make changes, just print what would be deleted.
+
+=item B<--[no-]keep-updates>
+
+Keep update .debs that haven't been installed yet (default).
+
+=item B<--[no-]keep-latest>
+
+Keep the latest version .deb for each package in the archive.
+
+=item B<--[no-]keep-installed>
+
+Keep the installed version of each package in the archive.
+
+=item B<--debug>
+
+Print some debugging info.
+
+=item B<--help|-h>
+
+Print a brief help message and exits.
+
+=item B<--man>
+
+Prints the manual page and exits.
+
+=back
+
+=head1 DESCRIPTION
+
+B<apt-deepclean> goes beyond B<apt clean> and B<apt autoclean> to remove
+all the files from the apt archive that you'll probably never need.
+
+By default it leaves files that are newer than the installed package.
+
+B<apt autoclean> does not remove files that are available in the mirror.
+So if your mirror has dozens of versions of a package available, your
+local archive will too. For some packages that run in to the hundreds
+of megabytes, on repos that leave many versions available for customers,
+this can turn into a real problem.
+
+B<apt-deepclean> solves this.  You might want to run it from cron or your
+devops environment on occasion to keep your disk usage under control.
+
+If you frequently downgrade packages you won't want to use this.  If you
+want to be able to reinstall the currently installed package, make sure
+you use the B<--keep-installed> flag.  If you really want to delete all
+the archives you can use --no-keep-updates but then maybe you would just
+want to use B<apt clean> instead?
+
+=cut
+
+=head1 BUGS
+
+This doesn't do anything with the partial/ directory. Is that a bug?
+Probably should check to see if apt/apt-get is running before deleting
+anything. How to do that the APT/Debian way?
+
+=cut
+
+=head1 AUTHOR
+
+Bill McGonigle <bill-deepclean@bfccomputing.com>, Copyright 2022.
+
+=cut
+
+=head1 VERSION
+
+2022032201 - first release. Expect bugs. Report bugs. Test before deployment.
+
+=cut
+
+=head1 LICENSE
+
+This code is licensed under the WTFPL 2.0 license.  Read about it here: http://www.wtfpl.net/about/
+
+BECAUSE THE PROGRAM IS LICENSED FREE OF CHARGE, THERE IS NO WARRANTY 
+FOR THE PROGRAM, TO THE EXTENT PERMITTED BY APPLICABLE LAW. 
+EXCEPT WHEN OTHERWISE STATED IN WRITING BY THE COPYRIGHT HOLDERS 
+AND/OR OTHER PARTIES. IN COUNTRIES WITH OBLIGATORY WARRANTY THE FULL
+EXTENT OF THE WARRANTY SHALL BE THE REFUND OF THE FULL PURCHASE PRICE
+OF THE PROGRAM.
+
+=cut
