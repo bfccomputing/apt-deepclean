@@ -147,7 +147,7 @@ foreach my $file (sort(@files_to_delete)) {
   if ($DRY_RUN) {
     print "would delete $filename\n";
   } else {
-    unlink "$ARCHIVE_DIR/$file" or warn "Could not unlink $file: $!";
+    unlink $filename or warn "Could not unlink $file: $!";
   }
 }
 
