@@ -51,7 +51,7 @@ want to use apt clean instead?
 Copy it somewhere handy.  Maybe set up a cron job.  Here's a sample puppet cron entry:
 
       cron { 'apt_deepclean' :
-        command     => '/usr/local/local/sbin/apt-deepclean',
+        command     => '/usr/local/sbin/apt-deepclean',
         user        => 'root',
         hour        => '1',
         minute      => '10',
