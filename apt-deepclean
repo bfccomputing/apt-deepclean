@@ -30,7 +30,8 @@ pod2usage(1) if $HELP;
 pod2usage(-exitval => 0, -verbose => 2, -noperldoc => 1) if $MAN;
 
 if ($DEBUG) {
-  use Data::Dumper;
+    use Data::Dumper;
+    $| = 1;
 }
 
 # maybe this can be pulled from APT preferences? TODO
@@ -73,7 +74,7 @@ my $cache         = AptPkg::Cache->new;
 my $policy        = $cache->policy;
 my $versioning    = $_system->versioning;
 
-foreach my $archive_package (keys(%archives)) {
+foreach my $archive_package (sort keys(%archives)) {
 
     my $package = $cache->{$archive_package};
     unless ($package) {
@@ -93,12 +94,15 @@ foreach my $archive_package (keys(%archives)) {
 #print Dumper(\%packages);
 
 my (@files_to_delete);
-foreach my $package (keys(%packages)) {
-  unless ($packages{$package}{'CurrentVer'} eq $packages{$package}{'CandidateVer'}) {
-    warn "package '$package' is pending upgrade ... ignoring.\n";
-    next;
+foreach my $package (sort keys(%packages)) {
+  debug("$package ::");
+  if ($packages{$package}{'CurrentState'} eq 'Installed') {
+    unless ($packages{$package}{'CurrentVer'} eq $packages{$package}{'CandidateVer'}) {
+      warn "package '$package' is pending upgrade ... ignoring.\n";
+      next;
+    }
   }
-  my $debug = "$package :: \n";
+  my $debug ='';
   foreach my $archive (keys(%archives)) {
     if ($package eq $archive) {
       my @versions = ();
@@ -107,20 +111,25 @@ foreach my $package (keys(%packages)) {
         my $version = $spec{'version'};
         push(@versions,$version);
       }
-      my @sorted_versions = sort( { $versioning->compare($a,$b) } @versions);
+      my (@sorted_versions);
+      if (1 == @versions) {
+	  $debug .= " only one version\n";
+	  @sorted_versions = @versions;
+      } else {
+	  @sorted_versions = sort( { $versioning->compare($a,$b) } @versions)
+      }
       $debug .= "archive versions: " . join(' ',@sorted_versions) ."\n";
       my @versions_to_delete = @sorted_versions;
-      if (1 == @versions) {
-        $debug .= " only one version\n";
-      }
-      if ($KEEP_LATEST) {
-        @versions_to_delete = grep { $_ ne $versions_to_delete[-1] } @versions_to_delete; 
-      }
-      if ($KEEP_INSTALLED) {
-        @versions_to_delete = grep { $_ ne $packages{$archive}{CurrentVer} } @versions_to_delete; 
-      }
-      if ($KEEP_UPDATES) {
-        @versions_to_delete = grep { $versioning->compare($_,$packages{$archive}{CurrentVer}) <= 0 } @versions_to_delete;
+      unless ($packages{$archive}{'SelectedState'} eq 'DeInstall' || $packages{$archive}{'CurrentState'} eq 'NotInstalled') {
+        if ($KEEP_LATEST) {
+          @versions_to_delete = grep { $_ ne $versions_to_delete[-1] } @versions_to_delete; 
+        }
+        if ($KEEP_INSTALLED) {
+          @versions_to_delete = grep { $_ ne $packages{$archive}{CurrentVer} } @versions_to_delete; 
+        }
+        if ($KEEP_UPDATES) {
+          @versions_to_delete = grep { $versioning->compare($_,$packages{$archive}{CurrentVer}) <= 0 } @versions_to_delete;
+        }
       }
       $debug .= "versions to delete: " . join(' ', @versions_to_delete) . "\n";
       foreach my $spec_ref ( @{$archives{$archive}} ) {
@@ -147,7 +156,7 @@ foreach my $file (sort(@files_to_delete)) {
   if ($DRY_RUN) {
     print "would delete $filename\n";
   } else {
-    unlink $filename or warn "Could not unlink $file: $!";
+    unlink "$ARCHIVE_DIR/$file" or warn "Could not unlink $file: $!";
   }
 }
 
@@ -239,9 +248,10 @@ Bill McGonigle <bill-deepclean@bfccomputing.com>, Copyright 2022.
 
 =cut
 
-=head1 VERSION
+=head1 VERSIONS
 
 2022032201 - first release. Expect bugs. Report bugs. Test before deployment.
+2022032501 - handle archives for packages that are no longer installed
 
 =cut
 
