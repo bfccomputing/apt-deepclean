@@ -98,7 +98,7 @@ foreach my $package (sort keys(%packages)) {
   debug("$package ::");
   if ($packages{$package}{'CurrentState'} eq 'Installed') {
     unless ($packages{$package}{'CurrentVer'} eq $packages{$package}{'CandidateVer'}) {
-      warn "package '$package' is pending upgrade ... ignoring.\n";
+      debug("package '$package' is pending upgrade ... ignoring.\n");
       next;
     }
   }
